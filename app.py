@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # App configuration
 st.set_page_config(page_title="Financial Stock Screener", layout="wide")
@@ -14,13 +16,9 @@ def load_data(uploaded_file):
     return None
 
 @st.cache_data
-def fetch_yfinance_data(symbols):
+def fetch_yfinance_data(symbols, start_date, end_date):
     if not symbols:
         return pd.DataFrame()
-    
-    # Get current date and date from 1 year ago
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)
     
     try:
         data = yf.download(
@@ -62,10 +60,53 @@ def fetch_yfinance_data(symbols):
         st.error(f"Error fetching data from Yahoo Finance: {e}")
         return pd.DataFrame()
 
+def create_technical_chart(symbol, start_date, end_date):
+    try:
+        data = yf.download(symbol, start=start_date, end=end_date)
+        if data.empty:
+            return None
+            
+        # Calculate indicators
+        data['SMA_20'] = data['Close'].rolling(window=20).mean()
+        data['SMA_50'] = data['Close'].rolling(window=50).mean()
+        
+        # Create subplots
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                          vertical_spacing=0.05,
+                          subplot_titles=(f"{symbol} Price", "Volume", "RSI"),
+                          row_heights=[0.6, 0.2, 0.2])
+        
+        # Price plot
+        fig.add_trace(go.Scatter(x=data.index, y=data['Close'], name='Price'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=data.index, y=data['SMA_20'], name='20-day SMA'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=data.index, y=data['SMA_50'], name='50-day SMA'), row=1, col=1)
+        
+        # Volume plot
+        fig.add_trace(go.Bar(x=data.index, y=data['Volume'], name='Volume'), row=2, col=1)
+        
+        # RSI plot
+        delta = data['Close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        fig.add_trace(go.Scatter(x=data.index, y=rsi, name='RSI'), row=3, col=1)
+        fig.add_hline(y=70, row=3, col=1, line_dash="dash", line_color="red")
+        fig.add_hline(y=30, row=3, col=1, line_dash="dash", line_color="green")
+        
+        fig.update_layout(height=800, showlegend=True, hovermode='x unified')
+        return fig
+    except Exception as e:
+        st.error(f"Error creating chart: {e}")
+        return None
+
 # Main app
 def main():
     st.title("Financial Stock Screener")
-    st.write("Upload an Excel file with stock symbols and use filters to screen stocks. Data will only be fetched from Yahoo Finance after applying filters.")
+    st.write("Upload an Excel file with stock symbols and use filters to screen stocks.")
     
     # File upload
     uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx', 'xls'])
@@ -89,37 +130,69 @@ def main():
             # Create filters
             st.sidebar.header("Filters")
             
-            # Sector filter
-            sectors = ['All'] + sorted(df['Sector'].dropna().unique().tolist())
-            selected_sector = st.sidebar.selectbox('Select Sector', sectors)
+            # Date range selector
+            start_date, end_date = st.sidebar.date_input(
+                "Date range",
+                value=[datetime.now() - timedelta(days=365), datetime.now()],
+                max_value=datetime.now()
+            )
             
-            # Industry Group filter (based on selected sector)
-            if selected_sector != 'All':
-                industry_groups = ['All'] + sorted(df[df['Sector'] == selected_sector]['Industry Group'].dropna().unique().tolist())
-            else:
-                industry_groups = ['All'] + sorted(df['Industry Group'].dropna().unique().tolist())
-            selected_industry_group = st.sidebar.selectbox('Select Industry Group', industry_groups)
+            # Multi-select filters
+            selected_sectors = st.sidebar.multiselect(
+                'Select Sectors',
+                options=sorted(df['Sector'].unique()),
+                default=None
+            )
             
-            # Industry filter (based on selected sector and industry group)
-            if selected_sector != 'All' and selected_industry_group != 'All':
-                industries = ['All'] + sorted(df[(df['Sector'] == selected_sector) & 
-                                              (df['Industry Group'] == selected_industry_group)]['Industry'].dropna().unique().tolist())
-            elif selected_sector != 'All':
-                industries = ['All'] + sorted(df[df['Sector'] == selected_sector]['Industry'].dropna().unique().tolist())
-            elif selected_industry_group != 'All':
-                industries = ['All'] + sorted(df[df['Industry Group'] == selected_industry_group]['Industry'].dropna().unique().tolist())
+            # Industry Group filter (based on selected sectors)
+            if selected_sectors:
+                industry_groups = st.sidebar.multiselect(
+                    'Select Industry Groups',
+                    options=sorted(df[df['Sector'].isin(selected_sectors)]['Industry Group'].unique()),
+                    default=None
+                )
             else:
-                industries = ['All'] + sorted(df['Industry'].dropna().unique().tolist())
-            selected_industry = st.sidebar.selectbox('Select Industry', industries)
+                industry_groups = st.sidebar.multiselect(
+                    'Select Industry Groups',
+                    options=sorted(df['Industry Group'].unique()),
+                    default=None
+                )
+            
+            # Industry filter (based on selected sectors and industry groups)
+            if selected_sectors and industry_groups:
+                industries = st.sidebar.multiselect(
+                    'Select Industries',
+                    options=sorted(df[(df['Sector'].isin(selected_sectors)) & 
+                                   (df['Industry Group'].isin(industry_groups))]['Industry'].unique()),
+                    default=None
+                )
+            elif selected_sectors:
+                industries = st.sidebar.multiselect(
+                    'Select Industries',
+                    options=sorted(df[df['Sector'].isin(selected_sectors)]['Industry'].unique()),
+                    default=None
+                )
+            elif industry_groups:
+                industries = st.sidebar.multiselect(
+                    'Select Industries',
+                    options=sorted(df[df['Industry Group'].isin(industry_groups)]['Industry'].unique()),
+                    default=None
+                )
+            else:
+                industries = st.sidebar.multiselect(
+                    'Select Industries',
+                    options=sorted(df['Industry'].unique()),
+                    default=None
+                )
             
             # Apply filters
             filtered_df = df.copy()
-            if selected_sector != 'All':
-                filtered_df = filtered_df[filtered_df['Sector'] == selected_sector]
-            if selected_industry_group != 'All':
-                filtered_df = filtered_df[filtered_df['Industry Group'] == selected_industry_group]
-            if selected_industry != 'All':
-                filtered_df = filtered_df[filtered_df['Industry'] == selected_industry]
+            if selected_sectors:
+                filtered_df = filtered_df[filtered_df['Sector'].isin(selected_sectors)]
+            if industry_groups:
+                filtered_df = filtered_df[filtered_df['Industry Group'].isin(industry_groups)]
+            if industries:
+                filtered_df = filtered_df[filtered_df['Industry'].isin(industries)]
             
             st.subheader("Filtered Stocks")
             st.write(f"Found {len(filtered_df)} stocks matching your criteria")
@@ -131,7 +204,7 @@ def main():
                 if st.button("Fetch Financial Data from Yahoo Finance"):
                     with st.spinner("Fetching data from Yahoo Finance. This may take a while..."):
                         symbols = filtered_df['Symbol'].tolist()
-                        financial_data = fetch_yfinance_data(symbols)
+                        financial_data = fetch_yfinance_data(symbols, start_date, end_date)
                         
                         if not financial_data.empty:
                             st.success("Data fetched successfully!")
@@ -144,17 +217,28 @@ def main():
                                 how='left'
                             )
                             
-                            # Display results
-                            st.dataframe(result_df)
+                            # Display results in tabs
+                            tab1, tab2 = st.tabs(["Financial Data", "Technical Analysis"])
                             
-                            # Download button
-                            csv = result_df.to_csv(index=False).encode('utf-8')
-                            st.download_button(
-                                label="Download Results as CSV",
-                                data=csv,
-                                file_name='stock_screener_results.csv',
-                                mime='text/csv'
-                            )
+                            with tab1:
+                                st.dataframe(result_df)
+                                
+                                # Download button
+                                csv = result_df.to_csv(index=False).encode('utf-8')
+                                st.download_button(
+                                    label="Download Results as CSV",
+                                    data=csv,
+                                    file_name='stock_screener_results.csv',
+                                    mime='text/csv'
+                                )
+                            
+                            with tab2:
+                                selected_stock = st.selectbox("Select stock for technical analysis", result_df['Symbol'])
+                                chart = create_technical_chart(selected_stock, start_date, end_date)
+                                if chart:
+                                    st.plotly_chart(chart, use_container_width=True)
+                                else:
+                                    st.warning("Could not generate technical analysis for this stock")
                         else:
                             st.warning("No financial data was fetched. Please check your symbols.")
             else:
