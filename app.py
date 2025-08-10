@@ -12,7 +12,12 @@ st.set_page_config(page_title="Financial Stock Screener", layout="wide")
 @st.cache_data
 def load_data(uploaded_file):
     if uploaded_file is not None:
-        return pd.read_excel(uploaded_file)
+        df = pd.read_excel(uploaded_file)
+        # Convert filter columns to strings to handle mixed types
+        for col in ['Sector', 'Industry Group', 'Industry']:
+            if col in df.columns:
+                df[col] = df[col].astype(str).fillna('N/A')
+        return df
     return None
 
 @st.cache_data
@@ -70,21 +75,7 @@ def create_technical_chart(symbol, start_date, end_date):
         data['SMA_20'] = data['Close'].rolling(window=20).mean()
         data['SMA_50'] = data['Close'].rolling(window=50).mean()
         
-        # Create subplots
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                          vertical_spacing=0.05,
-                          subplot_titles=(f"{symbol} Price", "Volume", "RSI"),
-                          row_heights=[0.6, 0.2, 0.2])
-        
-        # Price plot
-        fig.add_trace(go.Scatter(x=data.index, y=data['Close'], name='Price'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=data.index, y=data['SMA_20'], name='20-day SMA'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=data.index, y=data['SMA_50'], name='50-day SMA'), row=1, col=1)
-        
-        # Volume plot
-        fig.add_trace(go.Bar(x=data.index, y=data['Volume'], name='Volume'), row=2, col=1)
-        
-        # RSI plot
+        # Calculate RSI
         delta = data['Close'].diff()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
@@ -93,11 +84,60 @@ def create_technical_chart(symbol, start_date, end_date):
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         
-        fig.add_trace(go.Scatter(x=data.index, y=rsi, name='RSI'), row=3, col=1)
+        # Create subplots
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                          vertical_spacing=0.05,
+                          subplot_titles=(f"{symbol} Price", "Volume", "RSI (14)"),
+                          row_heights=[0.6, 0.2, 0.2])
+        
+        # Price plot
+        fig.add_trace(go.Scatter(
+            x=data.index, 
+            y=data['Close'], 
+            name='Price',
+            line=dict(color='royalblue', width=2)
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Scatter(
+            x=data.index, 
+            y=data['SMA_20'], 
+            name='20-day SMA',
+            line=dict(color='orange', width=1.5)
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Scatter(
+            x=data.index, 
+            y=data['SMA_50'], 
+            name='50-day SMA',
+            line=dict(color='green', width=1.5)
+        ), row=1, col=1)
+        
+        # Volume plot
+        fig.add_trace(go.Bar(
+            x=data.index, 
+            y=data['Volume'], 
+            name='Volume',
+            marker_color='rgba(100, 149, 237, 0.6)'
+        ), row=2, col=1)
+        
+        # RSI plot
+        fig.add_trace(go.Scatter(
+            x=data.index, 
+            y=rsi, 
+            name='RSI',
+            line=dict(color='purple', width=2)
+        ), row=3, col=1)
+        
+        # Add RSI reference lines
         fig.add_hline(y=70, row=3, col=1, line_dash="dash", line_color="red")
         fig.add_hline(y=30, row=3, col=1, line_dash="dash", line_color="green")
         
-        fig.update_layout(height=800, showlegend=True, hovermode='x unified')
+        fig.update_layout(
+            height=800, 
+            showlegend=True, 
+            hovermode='x unified',
+            template='plotly_white'
+        )
         return fig
     except Exception as e:
         st.error(f"Error creating chart: {e}")
@@ -137,51 +177,51 @@ def main():
                 max_value=datetime.now()
             )
             
-            # Multi-select filters
+            # Multi-select filters with string conversion
             selected_sectors = st.sidebar.multiselect(
                 'Select Sectors',
-                options=sorted(df['Sector'].unique()),
+                options=sorted(df['Sector'].astype(str).unique()),
                 default=None
             )
             
-            # Industry Group filter (based on selected sectors)
+            # Industry Group filter
             if selected_sectors:
                 industry_groups = st.sidebar.multiselect(
                     'Select Industry Groups',
-                    options=sorted(df[df['Sector'].isin(selected_sectors)]['Industry Group'].unique()),
+                    options=sorted(df[df['Sector'].isin(selected_sectors)]['Industry Group'].astype(str).unique()),
                     default=None
                 )
             else:
                 industry_groups = st.sidebar.multiselect(
                     'Select Industry Groups',
-                    options=sorted(df['Industry Group'].unique()),
+                    options=sorted(df['Industry Group'].astype(str).unique()),
                     default=None
                 )
             
-            # Industry filter (based on selected sectors and industry groups)
+            # Industry filter
             if selected_sectors and industry_groups:
                 industries = st.sidebar.multiselect(
                     'Select Industries',
                     options=sorted(df[(df['Sector'].isin(selected_sectors)) & 
-                                   (df['Industry Group'].isin(industry_groups))]['Industry'].unique()),
+                                   (df['Industry Group'].isin(industry_groups))]['Industry'].astype(str).unique()),
                     default=None
                 )
             elif selected_sectors:
                 industries = st.sidebar.multiselect(
                     'Select Industries',
-                    options=sorted(df[df['Sector'].isin(selected_sectors)]['Industry'].unique()),
+                    options=sorted(df[df['Sector'].isin(selected_sectors)]['Industry'].astype(str).unique()),
                     default=None
                 )
             elif industry_groups:
                 industries = st.sidebar.multiselect(
                     'Select Industries',
-                    options=sorted(df[df['Industry Group'].isin(industry_groups)]['Industry'].unique()),
+                    options=sorted(df[df['Industry Group'].isin(industry_groups)]['Industry'].astype(str).unique()),
                     default=None
                 )
             else:
                 industries = st.sidebar.multiselect(
                     'Select Industries',
-                    options=sorted(df['Industry'].unique()),
+                    options=sorted(df['Industry'].astype(str).unique()),
                     default=None
                 )
             
@@ -233,7 +273,11 @@ def main():
                                 )
                             
                             with tab2:
-                                selected_stock = st.selectbox("Select stock for technical analysis", result_df['Symbol'])
+                                selected_stock = st.selectbox(
+                                    "Select stock for technical analysis", 
+                                    result_df['Symbol'],
+                                    key='tech_analysis_select'
+                                )
                                 chart = create_technical_chart(selected_stock, start_date, end_date)
                                 if chart:
                                     st.plotly_chart(chart, use_container_width=True)
