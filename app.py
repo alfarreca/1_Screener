@@ -1,12 +1,10 @@
-# app.py — Streamlit Cloud friendly orchestrator
 import sys
 import pathlib
 import importlib
-import inspect
 import pandas as pd
 import streamlit as st
 
-# --- Ensure repo root is on PYTHONPATH (helps on Streamlit Cloud if using subfolders) ---
+# --- Ensure repo root is on PYTHONPATH (helps on Streamlit Cloud) ---
 APP_DIR = pathlib.Path(__file__).parent.resolve()
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
@@ -28,64 +26,20 @@ from visualization import (
     show_filtered_table,
     show_results_table,
     download_csv_button,
+    render_quick_filters,
+    render_search_box,
+    apply_quick_filters_and_search,
 )
 
-# Optional extras (won’t break if you don’t use them)
-# If your visualization.py doesn’t have these yet, comment them out or update that file.
-try:
-    from visualization import (
-        render_quick_filters,
-        render_search_box,
-        apply_quick_filters_and_search,
-        version_badge,  # shows module version/path in sidebar
-        __VIS_VERSION__,
-    )
-    HAS_EXTRAS = True
-except Exception:
-    HAS_EXTRAS = False
-    __VIS_VERSION__ = "unknown"
-
-
 st.set_page_config(page_title="Financial Stock Screener", layout="wide")
-
-
-def show_diagnostics():
-    """Sidebar diagnostics to prove the correct visualization.py is loaded."""
-    st.sidebar.markdown("### Diagnostics")
-    if HAS_EXTRAS:
-        try:
-            version_badge()
-        except Exception:
-            st.sidebar.caption("version_badge() failed to render.")
-    st.sidebar.caption(f"Visualization version: {__VIS_VERSION__}")
-    st.sidebar.caption("Imported visualization from:")
-    try:
-        st.sidebar.code(str(pathlib.Path(visualization.__file__).resolve()))
-    except Exception as e:
-        st.sidebar.write(f"(path unavailable: {e})")
-
-    # peek first lines of the module so you know which file is active
-    try:
-        src_head = inspect.getsource(visualization)[:300]
-        st.sidebar.code(src_head + "\n...[truncated]")
-    except Exception:
-        pass
-
-    # cache utilities
-    if st.sidebar.button("Force clear cache"):
-        st.cache_data.clear()
-        st.rerun()
 
 
 def main():
     st.title("Financial Stock Screener")
     st.caption(
-        "Upload an Excel with at least: Symbol, Sector, Industry Group, Industry (Name optional). "
-        "Filter in the sidebar. Fetch Yahoo Finance data on demand."
+        "Upload an Excel file with at least: Symbol, Sector, Industry Group, Industry (Name optional). "
+        "Filter in the sidebar. Financial data is fetched from Yahoo Finance only when you click the button."
     )
-
-    # Diagnostics (confirm the right module is loaded on Streamlit Cloud)
-    show_diagnostics()
 
     # === Upload ===
     uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
@@ -105,10 +59,10 @@ def main():
     # Optional: show raw uploaded data
     checkbox_show_raw(df)
 
-    # === Sidebar filters (taxonomy) ===
+    # === Sidebar filters ===
     selected_sector, selected_industry_group, selected_industry = render_sidebar_filters(df)
 
-    # === Apply filters (logic) ===
+    # === Apply taxonomy filters ===
     filtered_df = apply_filters(
         df,
         selected_sector=selected_sector,
@@ -116,14 +70,10 @@ def main():
         selected_industry=selected_industry,
     )
 
-    # === Optional extras: quick filters + search ===
-    if HAS_EXTRAS:
-        try:
-            quick = render_quick_filters(filtered_df)  # More filters: Theme / Country / Asset_Type
-            query = render_search_box()                # Search Symbol/Name
-            filtered_df = apply_quick_filters_and_search(filtered_df, quick, query)
-        except Exception:
-            pass  # Stay resilient if extras are missing
+    # === Apply quick filters & search ===
+    quick = render_quick_filters(filtered_df)   # More filters: Theme / Country / Asset_Type
+    query = render_search_box()                 # Search Symbol/Name
+    filtered_df = apply_quick_filters_and_search(filtered_df, quick, query)
 
     st.subheader("Filtered Stocks")
     st.write(f"Found **{len(filtered_df)}** rows matching your criteria.")
