@@ -36,27 +36,22 @@ st.set_page_config(page_title="Financial Stock Screener", layout="wide")
 
 # ---------------- Numeric Filters ----------------
 def add_numeric_filters(df: pd.DataFrame):
-    """Sidebar numeric filters for common metrics."""
+    """Sidebar numeric filters for common metrics with safe guards."""
     st.sidebar.subheader("Numeric Filters")
     filters = {}
 
-    if "PE Ratio" in df.columns:
-        pe_num = pd.to_numeric(df["PE Ratio"], errors="coerce")
-        if not pe_num.dropna().empty:
-            min_pe, max_pe = float(pe_num.min()), float(pe_num.max())
-            filters["PE Ratio"] = st.sidebar.slider("P/E Ratio", min_pe, max_pe, (min_pe, max_pe))
+    def safe_slider(colname, label):
+        """Helper to add slider only if enough valid range."""
+        if colname not in df.columns:
+            return
+        nums = pd.to_numeric(df[colname], errors="coerce").dropna()
+        if nums.nunique() > 1:  # must have more than 1 unique value
+            min_val, max_val = float(nums.min()), float(nums.max())
+            filters[colname] = st.sidebar.slider(label, min_val, max_val, (min_val, max_val))
 
-    if "Dividend Yield" in df.columns:
-        dy_num = pd.to_numeric(df["Dividend Yield"], errors="coerce")
-        if not dy_num.dropna().empty:
-            min_div, max_div = float(dy_num.min()), float(dy_num.max())
-            filters["Dividend Yield"] = st.sidebar.slider("Dividend Yield %", min_div, max_div, (min_div, max_div))
-
-    if "Market Cap" in df.columns:
-        mc_num = pd.to_numeric(df["Market Cap"], errors="coerce")
-        if not mc_num.dropna().empty:
-            min_mc, max_mc = float(mc_num.min()), float(mc_num.max())
-            filters["Market Cap"] = st.sidebar.slider("Market Cap ($)", min_mc, max_mc, (min_mc, max_mc))
+    safe_slider("PE Ratio", "P/E Ratio")
+    safe_slider("Dividend Yield", "Dividend Yield %")
+    safe_slider("Market Cap", "Market Cap ($)")
 
     return filters
 
