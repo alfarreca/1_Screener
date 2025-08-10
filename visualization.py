@@ -1,10 +1,8 @@
 import io
-import base64
 from typing import Tuple, Optional, List, Dict
 
 import pandas as pd
 import streamlit as st
-import yfinance as yf
 
 # ---------- Small helpers ----------
 
@@ -34,33 +32,6 @@ def _as_0_100(col: pd.Series) -> pd.Series:
     """Clamp to [0,100] for score bars."""
     x = pd.to_numeric(col, errors="coerce")
     return x.clip(lower=0, upper=100).round(1)
-
-@st.cache_data(show_spinner=False)
-def _sparkline_png_bytes(symbol: str, period: str = "1mo") -> Optional[bytes]:
-    """
-    Return PNG bytes for a tiny sparkline (or None on failure).
-    Cached per (symbol, period) to stay fast on Streamlit Cloud.
-    """
-    try:
-        data = yf.download(symbol, period=period, interval="1d", progress=False)
-        if data.empty or "Close" not in data:
-            return None
-
-        # Lazy headless matplotlib import so module import won't fail if matplotlib missing
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(figsize=(2, 0.5))
-        ax.plot(data["Close"], linewidth=1)
-        ax.axis("off")
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0, dpi=150)
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-    except Exception:
-        return None
 
 # ---------- Raw data toggle ----------
 
@@ -140,7 +111,7 @@ def column_selector(
             "Visible columns",
             options=ordered,
             default=ordered,
-            key=f"{key_prefix}visible_cols",
+            key=f"{key_prefix}visible_cols",  # unique key per table
         )
     return selected if selected else ordered
 
@@ -190,22 +161,18 @@ def show_filtered_table(filtered_df: pd.DataFrame, visible_cols: Optional[List[s
 def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]] = None) -> None:
     st.subheader("Results with Yahoo Finance Metrics")
 
-    # Normalize scores for progress bars
+    # Convert scores to 0-100 for progress bars (including Value-Contrarian)
     for score_col in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if score_col in result_df.columns:
             result_df[score_col] = _as_0_100(result_df[score_col])
 
-    # Humanized Market Cap column
+    # Prettify Market Cap
     if "Market Cap" in result_df.columns:
         result_df = result_df.copy()
         result_df["Market Cap (fmt)"] = result_df["Market Cap"].apply(_human_mc)
 
-    # Sparkline bytes column (fast thanks to cache)
-    if "Symbol" in result_df.columns:
-        result_df["Chart"] = result_df["Symbol"].apply(_sparkline_png_bytes)
-
     default_front = [
-        "Symbol", "Name", "Chart", "Sector", "Industry Group", "Industry",
+        "Symbol", "Name", "Sector", "Industry Group", "Industry",
         "Current Price", "PE Ratio", "Market Cap (fmt)", "Dividend Yield",
         "52 Week High", "52 Week Low", "Beta", "Volume", "Avg Volume",
         "Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"
@@ -216,19 +183,17 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
         visible_cols = column_selector(result_df, default_front=default_front, key_prefix="results_")
     table_df = result_df[visible_cols] if visible_cols else result_df[ordered]
 
-    # Column config: scores as progress bars; chart as ImageColumn
+    # Column config with progress bars for scores + nice number formats
     col_config = {}
+
+    # Scores as progress bars
     for sc in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if sc in table_df.columns:
-            col_config[sc] = st.column_config.ProgressColumn(sc, min_value=0, max_value=100, format="%.0f")
+            col_config[sc] = st.column_config.ProgressColumn(
+                sc, min_value=0, max_value=100, format="%.0f",
+            )
 
-    if "Chart" in table_df.columns:
-        col_config["Chart"] = st.column_config.ImageColumn(
-            "Chart",
-            help="30-day price sparkline",
-            width="small",
-        )
-
+    # Numeric formatting for core metrics
     for c in table_df.columns:
         if c in {"Current Price", "52 Week High", "52 Week Low"}:
             col_config[c] = st.column_config.NumberColumn(format="%.2f")
@@ -240,7 +205,7 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
         elif c == "Market Cap":
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
-        # Market Cap (fmt) is text already
+        # Market Cap (fmt) is already humanized text
 
     st.dataframe(
         table_df,
