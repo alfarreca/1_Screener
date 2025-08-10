@@ -34,27 +34,29 @@ from visualization import (
 st.set_page_config(page_title="Financial Stock Screener", layout="wide")
 
 
+# ---------------- Numeric Filters ----------------
 def add_numeric_filters(df: pd.DataFrame):
     """Sidebar numeric filters for common metrics."""
     st.sidebar.subheader("Numeric Filters")
     filters = {}
 
     if "PE Ratio" in df.columns:
-        min_pe = float(df["PE Ratio"].min(skipna=True) or 0)
-        max_pe = float(df["PE Ratio"].max(skipna=True) or 100)
-        filters["PE Ratio"] = st.sidebar.slider("P/E Ratio", min_pe, max_pe, (min_pe, max_pe))
+        pe_num = pd.to_numeric(df["PE Ratio"], errors="coerce")
+        if not pe_num.dropna().empty:
+            min_pe, max_pe = float(pe_num.min()), float(pe_num.max())
+            filters["PE Ratio"] = st.sidebar.slider("P/E Ratio", min_pe, max_pe, (min_pe, max_pe))
 
     if "Dividend Yield" in df.columns:
-        min_div = float(df["Dividend Yield"].min(skipna=True) or 0)
-        max_div = float(df["Dividend Yield"].max(skipna=True) or 10)
-        filters["Dividend Yield"] = st.sidebar.slider("Dividend Yield %", min_div, max_div, (min_div, max_div))
+        dy_num = pd.to_numeric(df["Dividend Yield"], errors="coerce")
+        if not dy_num.dropna().empty:
+            min_div, max_div = float(dy_num.min()), float(dy_num.max())
+            filters["Dividend Yield"] = st.sidebar.slider("Dividend Yield %", min_div, max_div, (min_div, max_div))
 
     if "Market Cap" in df.columns:
-        min_mc = float(df["Market Cap"].min(skipna=True) or 0)
-        max_mc = float(df["Market Cap"].max(skipna=True) or 1e12)
-        filters["Market Cap"] = st.sidebar.slider(
-            "Market Cap ($)", min_mc, max_mc, (min_mc, max_mc)
-        )
+        mc_num = pd.to_numeric(df["Market Cap"], errors="coerce")
+        if not mc_num.dropna().empty:
+            min_mc, max_mc = float(mc_num.min()), float(mc_num.max())
+            filters["Market Cap"] = st.sidebar.slider("Market Cap ($)", min_mc, max_mc, (min_mc, max_mc))
 
     return filters
 
@@ -64,33 +66,44 @@ def apply_numeric_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     out = df.copy()
     for col, (low, high) in filters.items():
         if col in out.columns:
-            out = out[(out[col] >= low) & (out[col] <= high)]
+            num_col = pd.to_numeric(out[col], errors="coerce")
+            out = out[(num_col >= low) & (num_col <= high)]
     return out
 
 
+# ---------------- Scoring System ----------------
 def add_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """Add Value, Growth, Momentum scores."""
+    """Add Value, Growth, Momentum scores with safe numeric conversion."""
     out = df.copy()
 
     # Value Score: low P/E + high Dividend Yield
     if "PE Ratio" in out.columns and "Dividend Yield" in out.columns:
-        pe_rank = out["PE Ratio"].rank(ascending=True, pct=True)  # lower P/E = better
-        dy_rank = out["Dividend Yield"].rank(ascending=False, pct=True)  # higher yield = better
-        out["Value Score"] = ((pe_rank + dy_rank) / 2 * 100).round(1)
+        pe_num = pd.to_numeric(out["PE Ratio"], errors="coerce")
+        dy_num = pd.to_numeric(out["Dividend Yield"], errors="coerce")
+        if not pe_num.dropna().empty and not dy_num.dropna().empty:
+            pe_rank = pe_num.rank(ascending=True, pct=True)   # lower P/E = better
+            dy_rank = dy_num.rank(ascending=False, pct=True) # higher yield = better
+            out["Value Score"] = ((pe_rank + dy_rank) / 2 * 100).round(1)
 
-    # Growth Score: EPS growth % (if column exists)
+    # Growth Score: EPS growth %
     if "EPS Growth %" in out.columns:
-        out["Growth Score"] = out["EPS Growth %"].rank(ascending=False, pct=True) * 100
+        eps_num = pd.to_numeric(out["EPS Growth %"], errors="coerce")
+        if not eps_num.dropna().empty:
+            out["Growth Score"] = (eps_num.rank(ascending=False, pct=True) * 100).round(1)
 
     # Momentum Score: 52-week percentile
-    if "Current Price" in out.columns and "52 Week Low" in out.columns and "52 Week High" in out.columns:
-        rng = out["52 Week High"] - out["52 Week Low"]
-        rng = rng.replace(0, pd.NA)
-        out["Momentum Score"] = ((out["Current Price"] - out["52 Week Low"]) / rng * 100).round(1)
+    if {"Current Price", "52 Week Low", "52 Week High"} <= set(out.columns):
+        cp = pd.to_numeric(out["Current Price"], errors="coerce")
+        low = pd.to_numeric(out["52 Week Low"], errors="coerce")
+        high = pd.to_numeric(out["52 Week High"], errors="coerce")
+        rng = (high - low).replace(0, pd.NA)
+        if not rng.dropna().empty:
+            out["Momentum Score"] = ((cp - low) / rng * 100).round(1)
 
     return out
 
 
+# ---------------- Main App ----------------
 def main():
     st.title("Financial Stock Screener (Pro)")
     st.caption(
@@ -98,6 +111,7 @@ def main():
         "Filter in the sidebar. Fetch Yahoo Finance data for scores and metrics."
     )
 
+    # === Upload ===
     uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
     if not uploaded_file:
         st.info("Please upload an Excel file to begin.")
@@ -112,10 +126,13 @@ def main():
         st.error(f"Missing required columns. Your file must include: {sorted(REQUIRED_COLUMNS)}")
         st.stop()
 
+    # Optional: show raw uploaded data
     checkbox_show_raw(df)
 
+    # === Sidebar taxonomy filters ===
     selected_sector, selected_industry_group, selected_industry = render_sidebar_filters(df)
 
+    # === Apply taxonomy filters ===
     filtered_df = apply_filters(
         df,
         selected_sector=selected_sector,
@@ -123,6 +140,7 @@ def main():
         selected_industry=selected_industry,
     )
 
+    # === Apply quick filters & search ===
     quick = render_quick_filters(filtered_df)
     query = render_search_box()
     filtered_df = apply_quick_filters_and_search(filtered_df, quick, query)
@@ -135,6 +153,7 @@ def main():
 
     show_filtered_table(filtered_df)
 
+    # === Fetch + merge (on demand) ===
     if st.button("Fetch Financial Data from Yahoo Finance"):
         with st.spinner("Fetching data from Yahoo Finance…"):
             symbols = (
