@@ -1,8 +1,11 @@
 import io
+import base64
 from typing import Tuple, Optional, List, Dict
 
 import pandas as pd
 import streamlit as st
+import yfinance as yf
+import matplotlib.pyplot as plt
 
 # ---------- Small helpers ----------
 
@@ -32,6 +35,25 @@ def _as_0_100(col: pd.Series) -> pd.Series:
     """Clamp to [0,100] for score bars."""
     x = pd.to_numeric(col, errors="coerce")
     return x.clip(lower=0, upper=100).round(1)
+
+def _sparkline(symbol: str, period: str = "1mo") -> str:
+    """
+    Returns a base64 PNG sparkline for the given ticker.
+    """
+    try:
+        data = yf.download(symbol, period=period, interval="1d", progress=False)
+        if data.empty:
+            return ""
+        fig, ax = plt.subplots(figsize=(2, 0.5))
+        ax.plot(data["Close"], linewidth=1, color="black")
+        ax.axis("off")
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0, dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return f"data:image/png;base64,{base64.b64encode(buf.read()).decode()}"
+    except Exception:
+        return ""
 
 # ---------- Raw data toggle ----------
 
@@ -111,7 +133,7 @@ def column_selector(
             "Visible columns",
             options=ordered,
             default=ordered,
-            key=f"{key_prefix}visible_cols",  # unique key per table
+            key=f"{key_prefix}visible_cols",
         )
     return selected if selected else ordered
 
@@ -161,18 +183,20 @@ def show_filtered_table(filtered_df: pd.DataFrame, visible_cols: Optional[List[s
 def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]] = None) -> None:
     st.subheader("Results with Yahoo Finance Metrics")
 
-    # Convert scores to 0-100 for progress bars (including Value-Contrarian)
     for score_col in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if score_col in result_df.columns:
             result_df[score_col] = _as_0_100(result_df[score_col])
 
-    # Prettify Market Cap
     if "Market Cap" in result_df.columns:
         result_df = result_df.copy()
         result_df["Market Cap (fmt)"] = result_df["Market Cap"].apply(_human_mc)
 
+    # Add sparkline chart for each symbol
+    if "Symbol" in result_df.columns:
+        result_df["Chart"] = result_df["Symbol"].apply(lambda s: f'<img src="{_sparkline(s)}">' if _sparkline(s) else "")
+
     default_front = [
-        "Symbol", "Name", "Sector", "Industry Group", "Industry",
+        "Symbol", "Name", "Chart", "Sector", "Industry Group", "Industry",
         "Current Price", "PE Ratio", "Market Cap (fmt)", "Dividend Yield",
         "52 Week High", "52 Week Low", "Beta", "Volume", "Avg Volume",
         "Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"
@@ -183,17 +207,13 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
         visible_cols = column_selector(result_df, default_front=default_front, key_prefix="results_")
     table_df = result_df[visible_cols] if visible_cols else result_df[ordered]
 
-    # Column config with progress bars for scores + nice number formats
     col_config = {}
-
-    # Scores as progress bars
     for sc in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if sc in table_df.columns:
             col_config[sc] = st.column_config.ProgressColumn(
                 sc, min_value=0, max_value=100, format="%.0f",
             )
 
-    # Numeric formatting for core metrics
     for c in table_df.columns:
         if c in {"Current Price", "52 Week High", "52 Week Low"}:
             col_config[c] = st.column_config.NumberColumn(format="%.2f")
@@ -205,47 +225,5 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
         elif c == "Market Cap":
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
-        # Market Cap (fmt) is already humanized text
-
-    st.dataframe(
-        table_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config=col_config,
-    )
-
-# ---------- Downloads ----------
-
-def _to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Results") -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
-    buf.seek(0)
-    return buf.read()
-
-def download_csv_button(df: pd.DataFrame, filename: str = "results.csv") -> Optional[bytes]:
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    try:
-        excel_bytes = _to_excel_bytes(df)
-    except Exception:
-        excel_bytes = None
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.download_button(
-            label="⬇️ Download CSV",
-            data=csv_bytes,
-            file_name=filename,
-            mime="text/csv",
-            key="dl_csv",
-        )
-    with c2:
-        if excel_bytes is not None:
-            st.download_button(
-                label="⬇️ Download Excel (.xlsx)",
-                data=excel_bytes,
-                file_name=filename.replace(".csv", ".xlsx") if filename.endswith(".csv") else "results.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_xlsx",
-            )
-    return csv_bytes
+        elif c == "Chart":
+            col_config[c] = st.column_config.Column("Chart", help="30-day price
