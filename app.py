@@ -2,6 +2,7 @@ import sys
 import pathlib
 import importlib
 import pandas as pd
+import numpy as np
 import streamlit as st
 
 # Ensure repo root is on PYTHONPATH (for Streamlit Cloud)
@@ -36,17 +37,20 @@ st.set_page_config(page_title="Financial Stock Screener", layout="wide")
 
 # ---------------- Numeric Filters ----------------
 def add_numeric_filters(df: pd.DataFrame):
-    """Sidebar numeric filters for common metrics with safe guards."""
+    """Sidebar numeric filters for common metrics with strong guards."""
     st.sidebar.subheader("Numeric Filters")
     filters = {}
 
     def safe_slider(colname, label):
-        """Helper to add slider only if enough valid range."""
+        """Add slider only if enough valid numeric range for Streamlit."""
         if colname not in df.columns:
             return
-        nums = pd.to_numeric(df[colname], errors="coerce").dropna()
-        if nums.nunique() > 1:  # must have more than 1 unique value
-            min_val, max_val = float(nums.min()), float(nums.max())
+        nums = pd.to_numeric(df[colname], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if nums.empty:
+            return
+        min_val, max_val = float(nums.min()), float(nums.max())
+        # Ensure finite numbers and real range
+        if np.isfinite(min_val) and np.isfinite(max_val) and (max_val - min_val) > 0:
             filters[colname] = st.sidebar.slider(label, min_val, max_val, (min_val, max_val))
 
     safe_slider("PE Ratio", "P/E Ratio")
