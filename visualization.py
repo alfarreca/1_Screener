@@ -20,7 +20,7 @@ def _frontload_columns(df: pd.DataFrame, front: List[str]) -> List[str]:
 # ---------- Raw data toggle ----------
 
 def checkbox_show_raw(df: pd.DataFrame) -> None:
-    """Optional toggle to display raw uploaded data, inside an expander."""
+    """Optional toggle to display raw uploaded data."""
     if st.checkbox("Show raw uploaded data"):
         with st.expander("Raw data", expanded=False):
             st.dataframe(
@@ -30,17 +30,9 @@ def checkbox_show_raw(df: pd.DataFrame) -> None:
             )
 
 
-# ---------- Sidebar filters (compatible with current app.py) ----------
+# ---------- Sidebar filters ----------
 
 def render_sidebar_filters(df: pd.DataFrame) -> Tuple[str, str, str]:
-    """
-    Build sidebar dropdowns and return selected values for:
-    Sector -> Industry Group -> Industry
-
-    This keeps the same return signature used by app.py.
-    Extra optional controls (search/quick filters) are provided
-    via dedicated helpers to avoid breaking existing code.
-    """
     st.sidebar.header("Filters")
 
     sectors = ["All"] + _sorted_unique(df["Sector"])
@@ -68,13 +60,9 @@ def render_sidebar_filters(df: pd.DataFrame) -> Tuple[str, str, str]:
     return selected_sector, selected_industry_group, selected_industry
 
 
-# ---------- Optional: extra filters & search (call from app.py if desired) ----------
+# ---------- Quick filters & search ----------
 
 def render_quick_filters(df: pd.DataFrame) -> Dict[str, List[str]]:
-    """
-    Optional multi-select quick filters for Theme, Country, Asset_Type.
-    Returns a dict of selections. Safe to ignore if app.py doesn't consume it.
-    """
     out: Dict[str, List[str]] = {}
     with st.sidebar.expander("More filters", expanded=False):
         for col in ["Theme", "Country", "Asset_Type"]:
@@ -86,18 +74,10 @@ def render_quick_filters(df: pd.DataFrame) -> Dict[str, List[str]]:
 
 
 def render_search_box() -> str:
-    """
-    Optional case-insensitive search across Symbol/Name (if present).
-    Returns the search string. Safe to ignore if app.py doesn't use it.
-    """
     return st.sidebar.text_input("Search Symbol/Name", value="", key="search").strip()
 
 
 def apply_quick_filters_and_search(df: pd.DataFrame, quick: Dict[str, List[str]], search: str) -> pd.DataFrame:
-    """
-    Apply optional quick filters + a simple text search on Symbol/Name.
-    Use this in app.py AFTER your taxonomy filters, if desired.
-    """
     out = df.copy()
     for col, sel in quick.items():
         if sel and col in out.columns:
@@ -115,9 +95,14 @@ def apply_quick_filters_and_search(df: pd.DataFrame, quick: Dict[str, List[str]]
 
 # ---------- Column visibility ----------
 
-def column_selector(df: pd.DataFrame, default_front: Optional[List[str]] = None) -> List[str]:
+def column_selector(
+    df: pd.DataFrame,
+    default_front: Optional[List[str]] = None,
+    key_prefix: str = ""
+) -> List[str]:
     """
     Let the user select which columns to show.
+    key_prefix avoids key collisions when used in multiple places.
     """
     with st.expander("Columns", expanded=False):
         ordered = _frontload_columns(df, default_front or ["Symbol", "Name", "Sector", "Industry Group", "Industry"])
@@ -125,7 +110,7 @@ def column_selector(df: pd.DataFrame, default_front: Optional[List[str]] = None)
             "Visible columns",
             options=ordered,
             default=ordered,  # show all by default
-            key="visible_cols",
+            key=f"{key_prefix}visible_cols",   # unique key to prevent duplication
         )
     return selected if selected else ordered
 
@@ -133,9 +118,6 @@ def column_selector(df: pd.DataFrame, default_front: Optional[List[str]] = None)
 # ---------- Summary chips ----------
 
 def show_summary_chips(df: pd.DataFrame) -> None:
-    """
-    Tiny summaries for situational awareness. Safe if some columns are missing.
-    """
     cols = st.columns(3)
     if "Sector" in df.columns:
         cols[0].metric("Sectors", df["Sector"].nunique())
@@ -148,19 +130,13 @@ def show_summary_chips(df: pd.DataFrame) -> None:
 # ---------- Tables ----------
 
 def show_filtered_table(filtered_df: pd.DataFrame, visible_cols: Optional[List[str]] = None) -> None:
-    """
-    Display a compact table of the filtered rows with column configs.
-    Backward-compatible: app.py can call with just (filtered_df).
-    """
     st.caption("Preview of symbols that match current filters")
     show_summary_chips(filtered_df)
 
-    # Column order / selection
     if visible_cols is None:
-        visible_cols = column_selector(filtered_df)
+        visible_cols = column_selector(filtered_df, key_prefix="preview_")
     table_df = filtered_df[visible_cols] if visible_cols else filtered_df
 
-    # Column config with gentle formatting
     col_config = {}
     for c in table_df.columns:
         if pd.api.types.is_float_dtype(table_df[c]):
@@ -177,25 +153,17 @@ def show_filtered_table(filtered_df: pd.DataFrame, visible_cols: Optional[List[s
 
 
 def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]] = None) -> None:
-    """
-    Display results with financial metrics and better number formatting.
-    Backward-compatible signature.
-    """
     st.subheader("Results with Yahoo Finance Metrics")
 
-    # Default visible order: key metadata first, then metrics
     default_front = ["Symbol", "Name", "Sector", "Industry Group", "Industry",
                      "Current Price", "PE Ratio", "Market Cap", "Dividend Yield",
                      "52 Week High", "52 Week Low", "Beta", "Volume", "Avg Volume"]
     ordered = _frontload_columns(result_df, default_front)
 
     if visible_cols is None:
-        # Let user optionally slim down columns
-        visible_cols = column_selector(result_df, default_front=default_front)
-
+        visible_cols = column_selector(result_df, default_front=default_front, key_prefix="results_")
     table_df = result_df[visible_cols] if visible_cols else result_df[ordered]
 
-    # Build column config / human-friendly formats
     col_config = {}
     for c in table_df.columns:
         if c in {"Current Price", "52 Week High", "52 Week Low"}:
@@ -205,7 +173,6 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
         elif c in {"Dividend Yield"}:
             col_config[c] = st.column_config.NumberColumn(format="%.2f%%")
         elif c in {"Market Cap"}:
-            # Market cap in billions when large
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
         elif pd.api.types.is_float_dtype(table_df[c]):
             col_config[c] = st.column_config.NumberColumn(format="%.3f")
@@ -231,9 +198,6 @@ def _to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Results") -> bytes:
 
 
 def download_csv_button(df: pd.DataFrame, filename: str = "results.csv") -> Optional[bytes]:
-    """
-    Render CSV and Excel download buttons; return CSV bytes (for compatibility).
-    """
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     excel_bytes = _to_excel_bytes(df)
 
