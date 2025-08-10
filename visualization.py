@@ -193,7 +193,10 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
 
     # Add sparkline chart for each symbol
     if "Symbol" in result_df.columns:
-        result_df["Chart"] = result_df["Symbol"].apply(lambda s: f'<img src="{_sparkline(s)}">' if _sparkline(s) else "")
+        def make_chart(sym):
+            img = _sparkline(sym)
+            return f'<img src="{img}">' if img else ""
+        result_df["Chart"] = result_df["Symbol"].apply(make_chart)
 
     default_front = [
         "Symbol", "Name", "Chart", "Sector", "Industry Group", "Industry",
@@ -226,4 +229,47 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
         elif c == "Market Cap":
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
         elif c == "Chart":
-            col_config[c] = st.column_config.Column("Chart", help="30-day price
+            col_config[c] = st.column_config.Column("Chart", help="30-day price sparkline")
+
+    st.dataframe(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=col_config,
+    )
+
+# ---------- Downloads ----------
+
+def _to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Results") -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+    buf.seek(0)
+    return buf.read()
+
+def download_csv_button(df: pd.DataFrame, filename: str = "results.csv") -> Optional[bytes]:
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    try:
+        excel_bytes = _to_excel_bytes(df)
+    except Exception:
+        excel_bytes = None
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            label="⬇️ Download CSV",
+            data=csv_bytes,
+            file_name=filename,
+            mime="text/csv",
+            key="dl_csv",
+        )
+    with c2:
+        if excel_bytes is not None:
+            st.download_button(
+                label="⬇️ Download Excel (.xlsx)",
+                data=excel_bytes,
+                file_name=filename.replace(".csv", ".xlsx") if filename.endswith(".csv") else "results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_xlsx",
+            )
+    return csv_bytes
