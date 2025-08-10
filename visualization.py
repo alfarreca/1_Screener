@@ -111,7 +111,7 @@ def column_selector(
             "Visible columns",
             options=ordered,
             default=ordered,
-            key=f"{key_prefix}visible_cols",
+            key=f"{key_prefix}visible_cols",  # unique key per table
         )
     return selected if selected else ordered
 
@@ -161,12 +161,12 @@ def show_filtered_table(filtered_df: pd.DataFrame, visible_cols: Optional[List[s
 def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]] = None) -> None:
     st.subheader("Results with Yahoo Finance Metrics")
 
-    # Convert score columns to 0-100 for bars if present
-    for score_col in ["Value Score", "Growth Score", "Momentum Score"]:
+    # Convert scores to 0-100 for progress bars (including Value-Contrarian)
+    for score_col in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if score_col in result_df.columns:
             result_df[score_col] = _as_0_100(result_df[score_col])
 
-    # Prettify Market Cap to humanized string column (non-destructive)
+    # Prettify Market Cap
     if "Market Cap" in result_df.columns:
         result_df = result_df.copy()
         result_df["Market Cap (fmt)"] = result_df["Market Cap"].apply(_human_mc)
@@ -175,7 +175,7 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
         "Symbol", "Name", "Sector", "Industry Group", "Industry",
         "Current Price", "PE Ratio", "Market Cap (fmt)", "Dividend Yield",
         "52 Week High", "52 Week Low", "Beta", "Volume", "Avg Volume",
-        "Value Score", "Growth Score", "Momentum Score"
+        "Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"
     ]
     ordered = _frontload_columns(result_df, default_front)
 
@@ -185,14 +185,12 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
 
     # Column config with progress bars for scores + nice number formats
     col_config = {}
-    # Scores as progress bars if present
-    for sc in ["Value Score", "Growth Score", "Momentum Score"]:
+
+    # Scores as progress bars
+    for sc in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if sc in table_df.columns:
             col_config[sc] = st.column_config.ProgressColumn(
-                sc,
-                min_value=0,
-                max_value=100,
-                format="%.0f",
+                sc, min_value=0, max_value=100, format="%.0f",
             )
 
     # Numeric formatting for core metrics
@@ -207,7 +205,7 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
         elif c == "Market Cap":
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
-        # Market Cap (fmt) shows the humanized string; no NumberColumn needed
+        # Market Cap (fmt) is already humanized text
 
     st.dataframe(
         table_df,
