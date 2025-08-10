@@ -5,4 +5,4 @@ openpyxl==3.1.2
 numpy==1.26.2
 python-dateutil==2.8.2
 requests==2.31.0
-lxml==4.9.3
+lxml==4.9.1; sys_platform != 'linux'  # Skip on Streamlit Cloud
