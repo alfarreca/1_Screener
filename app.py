@@ -72,32 +72,47 @@ def apply_numeric_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 
 # ---------------- Scoring System ----------------
 def add_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """Add Value, Growth, Momentum scores with safe numeric conversion."""
+    """Add Value, Growth, Momentum, and Value-Contrarian scores with safe numeric conversion."""
     out = df.copy()
+
+    def as_num(s):
+        return pd.to_numeric(s, errors="coerce")
 
     # Value Score: low P/E + high Dividend Yield
     if "PE Ratio" in out.columns and "Dividend Yield" in out.columns:
-        pe_num = pd.to_numeric(out["PE Ratio"], errors="coerce")
-        dy_num = pd.to_numeric(out["Dividend Yield"], errors="coerce")
-        if not pe_num.dropna().empty and not dy_num.dropna().empty:
-            pe_rank = pe_num.rank(ascending=True, pct=True)   # lower P/E = better
-            dy_rank = dy_num.rank(ascending=False, pct=True) # higher yield = better
+        pe = as_num(out["PE Ratio"])
+        dy = as_num(out["Dividend Yield"])
+        if not pe.dropna().empty and not dy.dropna().empty:
+            pe_rank = pe.rank(ascending=True, pct=True)      # lower P/E = better
+            dy_rank = dy.rank(ascending=False, pct=True)     # higher yield = better
             out["Value Score"] = ((pe_rank + dy_rank) / 2 * 100).round(1)
 
     # Growth Score: EPS growth %
     if "EPS Growth %" in out.columns:
-        eps_num = pd.to_numeric(out["EPS Growth %"], errors="coerce")
-        if not eps_num.dropna().empty:
-            out["Growth Score"] = (eps_num.rank(ascending=False, pct=True) * 100).round(1)
+        eps = as_num(out["EPS Growth %"])
+        if not eps.dropna().empty:
+            out["Growth Score"] = (eps.rank(ascending=False, pct=True) * 100).round(1)
 
     # Momentum Score: 52-week percentile
     if {"Current Price", "52 Week Low", "52 Week High"} <= set(out.columns):
-        cp = pd.to_numeric(out["Current Price"], errors="coerce")
-        low = pd.to_numeric(out["52 Week Low"], errors="coerce")
-        high = pd.to_numeric(out["52 Week High"], errors="coerce")
-        rng = (high - low).replace(0, pd.NA)
+        cp = as_num(out["Current Price"])
+        lo = as_num(out["52 Week Low"])
+        hi = as_num(out["52 Week High"])
+        rng = (hi - lo).replace(0, pd.NA)
         if not rng.dropna().empty:
-            out["Momentum Score"] = ((cp - low) / rng * 100).round(1)
+            out["Momentum Score"] = ((cp - lo) / rng * 100).round(1)
+
+    # Value-Contrarian Score: high value + mid/low momentum (~40% sweet spot)
+    if "Value Score" in out.columns and "Momentum Score" in out.columns:
+        v = as_num(out["Value Score"]).clip(0, 100) / 100.0
+        m = as_num(out["Momentum Score"]).clip(0, 100) / 100.0
+
+        m_target = 0.40    # momentum sweet spot
+        falloff = 0.40     # how quickly score fades away from sweet spot
+        contrarian_factor = 1.0 - (abs(m - m_target) / falloff)
+        contrarian_factor = contrarian_factor.clip(lower=0, upper=1)
+
+        out["Value-Contrarian Score"] = (v * contrarian_factor * 100).round(1)
 
     return out
 
@@ -185,7 +200,11 @@ def main():
         result_df = apply_numeric_filters(result_df, num_filters)
 
         # === Sort by score ===
-        score_cols = [c for c in ["Value Score", "Growth Score", "Momentum Score"] if c in result_df.columns]
+        score_cols = [
+            c
+            for c in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]
+            if c in result_df.columns
+        ]
         if score_cols:
             sort_choice = st.sidebar.selectbox("Sort by Score", ["None"] + score_cols)
             if sort_choice != "None":
