@@ -1,11 +1,11 @@
-# app.py — Financial Stock Screener (Pro) + Risk Light v2 + Posture-Aware Scoring
-# --------------------------------------------------------------------------------
+# app.py — Financial Stock Screener (Pro) + Risk Light v2 + Posture-Aware Scoring (fixed)
+# ---------------------------------------------------------------------------------------
 # Features:
 # - SPX/VIX Risk Light with tri-state: RISK ON / AMBER—PRICE / AMBER—VOL / RISK OFF
 # - Daily or Intraday mode (15m/30m/60m), with Refresh button
 # - Screener flow using your existing modules: data_loader, analysis, visualization
 # - Value/Growth/Momentum + Value-Contrarian score
-# - NEW: Posture-Adjusted Score (PAS), Quality Gates, Position Size Factor
+# - Posture-Adjusted Score (PAS), Quality Gates, Position Size Factor
 #
 # Requirements: streamlit, pandas, numpy, (yfinance for Risk Light)
 
@@ -231,6 +231,11 @@ def _find_col(cols, candidates):
             return c
     return None
 
+def num_series_or_zero(df: pd.DataFrame, colname: str | None) -> pd.Series:
+    """Return numeric Series for column or a zero-series aligned to df index."""
+    if colname and colname in df.columns:
+        return pd.to_numeric(df[colname], errors="coerce").fillna(0)
+    return pd.Series(0.0, index=df.index)
 
 def posture_weights(state: str):
     """Weights for Momentum/Value/Growth and quality thresholds by posture."""
@@ -243,7 +248,6 @@ def posture_weights(state: str):
         return {"w": {"M": 0.10, "V": 0.30, "G": 0.00, "VC": 0.60}, "pe_cap": 20, "vc_min": 70, "size": 0.35}
     # Unknown → cautious (amber-like)
     return {"w": {"M": 0.25, "V": 0.25, "G": 0.00, "VC": 0.50}, "pe_cap": 25, "vc_min": 60, "size": 0.60}
-
 
 def add_posture_adjusted_score(df: pd.DataFrame, posture_state: str,
                                enforce_gates: bool = True,
@@ -261,11 +265,11 @@ def add_posture_adjusted_score(df: pd.DataFrame, posture_state: str,
     vc_col = "Value-Contrarian Score" if "Value-Contrarian Score" in out.columns else None
     pe_col = _find_col(out.columns, ["PE Ratio", "P/E", "PE"])
 
-    # Build base components (0..100); missing -> 0
-    V  = pd.to_numeric(out.get(v_col, 0), errors="coerce").fillna(0)
-    G  = pd.to_numeric(out.get(g_col, 0), errors="coerce").fillna(0)
-    M  = pd.to_numeric(out.get(m_col, 0), errors="coerce").fillna(0)
-    VC = pd.to_numeric(out.get(vc_col, 0), errors="coerce").fillna(0)
+    # Build base components (0..100); missing columns -> 0-series
+    V  = num_series_or_zero(out, v_col)
+    G  = num_series_or_zero(out, g_col)
+    M  = num_series_or_zero(out, m_col)
+    VC = num_series_or_zero(out, vc_col)
 
     w = W["w"]
     pas = (w["M"]*M + w["V"]*V + w["G"]*G + w["VC"]*VC)
@@ -405,7 +409,7 @@ def main():
         # === Add base scores ===
         result_df = add_scores(result_df)
 
-        # --- NEW: posture-aware scoring & gates ---
+        # --- Posture-aware scoring & gates ---
         st.sidebar.subheader("Posture Scoring")
         enforce = st.sidebar.checkbox("Enforce amber/red quality gates", value=True)
         need_pos_fcf = st.sidebar.checkbox("Require positive FCF margin (if available)", value=True)
