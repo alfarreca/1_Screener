@@ -1,12 +1,23 @@
-# app.py — with SPX/VIX Risk Light integrated
+# app.py — Financial Stock Screener (Pro) + Risk Light v2
+# -------------------------------------------------------
+# Features:
+# - SPX/VIX Risk Light with tri-state: RISK ON / AMBER—PRICE / AMBER—VOL / RISK OFF
+# - Daily or Intraday mode (15m/30m/60m), with Refresh button
+# - Screener flow using your existing modules: data_loader, analysis, visualization
+# - Value/Growth/Momentum + Value-Contrarian score
+#
+# Requirements: streamlit, pandas, numpy, (yfinance for Risk Light)
+
 import sys
 import pathlib
 import importlib
+from datetime import datetime, timezone
+
 import pandas as pd
 import numpy as np
 import streamlit as st
 
-# --- new: optional yfinance import for Risk Light ---
+# ---------- Optional yfinance for Risk Light ----------
 from functools import lru_cache
 try:
     import yfinance as yf
@@ -14,12 +25,15 @@ try:
 except Exception:
     YF_AVAILABLE = False
 
-# Ensure repo root is on PYTHONPATH (for Streamlit Cloud)
+# ---------- Streamlit page ----------
+st.set_page_config(page_title="Financial Stock Screener (Pro)", layout="wide")
+
+# ---------- Ensure repo path ----------
 APP_DIR = pathlib.Path(__file__).parent.resolve()
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-# Import and reload local modules
+# ---------- Local modules ----------
 import data_loader
 import analysis
 import visualization
@@ -41,17 +55,17 @@ from visualization import (
     apply_quick_filters_and_search,
 )
 
-st.set_page_config(page_title="Financial Stock Screener", layout="wide")
-
-
-# ==================== Risk Light (SPX/VIX) ====================
-@lru_cache(maxsize=32)
-def _last_close_yf(ticker: str):
-    """Fetch last close using yfinance with guards."""
+# ==================== Risk Light (SPX/VIX) v2 ====================
+@lru_cache(maxsize=256)
+def _last_price(ticker, period, interval, salt):
+    """
+    Get last price using yfinance; `salt` is a cache-buster integer.
+    Returns float or None.
+    """
     if not YF_AVAILABLE:
         return None
     try:
-        df = yf.Ticker(ticker).history(period="7d", interval="1d")
+        df = yf.Ticker(ticker).history(period=period, interval=interval)
         s = df["Close"].dropna()
         return float(s.iloc[-1]) if not s.empty else None
     except Exception:
@@ -59,70 +73,89 @@ def _last_close_yf(ticker: str):
 
 
 def render_risk_light_sidebar():
-    """Sidebar controls + compute risk posture. Returns dict with state/metrics."""
+    """
+    Sidebar controls + compute risk posture.
+    Returns a dict with state/metrics.
+    """
     st.sidebar.subheader("Risk Light (SPX/VIX)")
-
     enabled = st.sidebar.checkbox("Show Risk Light", value=True)
+
     spx_symbol = st.sidebar.text_input("SPX symbol (Yahoo)", value="^GSPC", help="Alt: SPY")
     vix_symbol = st.sidebar.text_input("VIX symbol (Yahoo)", value="^VIX")
+
+    # Data mode: daily or intraday
+    mode = st.sidebar.selectbox("Data mode", ["Daily close", "Intraday"])
+    if mode == "Daily close":
+        period, interval = "7d", "1d"
+    else:
+        intraday_interval = st.sidebar.selectbox("Intraday interval", ["15m", "30m", "60m"], index=0)
+        period, interval = "7d", intraday_interval
+
     spx_level = st.sidebar.number_input("SPX de-risk level", value=6100.0, step=25.0)
     vix_thr = st.sidebar.number_input("VIX threshold", value=18.0, step=0.5)
 
+    # Refresh button clears cache
+    if st.sidebar.button("Refresh risk data"):
+        try:
+            _last_price.cache_clear()
+        except Exception:
+            pass
+
     if not enabled:
         return {
-            "enabled": False,
-            "state": "HIDDEN",
-            "reason": "Disabled by user",
-            "spx_last": None,
-            "vix_last": None,
-            "spx_level": spx_level,
-            "vix_thr": vix_thr,
-            "risk_off": None,
+            "enabled": False, "state": "HIDDEN", "reason": "Disabled by user",
+            "spx_last": None, "vix_last": None,
+            "spx_level": spx_level, "vix_thr": vix_thr,
+            "risk_off": None, "amber": None,
+            "mode": mode, "interval": interval
         }
-
-    spx_last = _last_close_yf(spx_symbol)
-    vix_last = _last_close_yf(vix_symbol)
 
     if not YF_AVAILABLE:
         st.sidebar.warning("`yfinance` not installed. Add it to requirements.txt.")
-    state, reason, risk_off = "UNKNOWN", "Data unavailable", None
+
+    # Minute salt to auto-refresh roughly each minute on rerun
+    salt = int(datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
+    spx_last = _last_price(spx_symbol, period, interval, salt)
+    vix_last = _last_price(vix_symbol, period, interval, salt)
+
+    # Tri-state logic
+    state, reason, risk_off, amber = "UNKNOWN", "Data unavailable", None, None
     if (spx_last is not None) and (vix_last is not None):
-        risk_off = (spx_last < spx_level) or (vix_last > vix_thr)
-        if risk_off:
-            state = "RISK OFF"
-            reason = f"SPX<{spx_level:.0f} or VIX>{vix_thr:.0f}"
+        price_breach = spx_last < spx_level
+        vol_breach = vix_last > vix_thr
+
+        if price_breach and vol_breach:
+            state, reason, risk_off, amber = "RISK OFF", "Price < level AND Vol > threshold", True, None
+        elif price_breach:
+            state, reason, risk_off, amber = "AMBER — PRICE", "SPX<{}".format(int(spx_level)), False, "PRICE"
+        elif vol_breach:
+            state, reason, risk_off, amber = "AMBER — VOL", "VIX>{}".format(int(vix_thr)), False, "VOL"
         else:
-            state = "RISK ON"
-            reason = f"SPX≥{spx_level:.0f} and VIX≤{vix_thr:.0f}"
+            state, reason, risk_off, amber = "RISK ON", "SPX≥{} and VIX≤{}".format(int(spx_level), int(vix_thr)), False, None
 
     return {
-        "enabled": True,
-        "state": state,
-        "reason": reason,
-        "spx_last": spx_last,
-        "vix_last": vix_last,
-        "spx_level": spx_level,
-        "vix_thr": vix_thr,
-        "risk_off": risk_off,
+        "enabled": True, "state": state, "reason": reason,
+        "spx_last": spx_last, "vix_last": vix_last,
+        "spx_level": spx_level, "vix_thr": vix_thr,
+        "risk_off": risk_off, "amber": amber,
+        "mode": mode, "interval": interval
     }
 # ===============================================================
 
 
 # ---------------- Numeric Filters ----------------
 def add_numeric_filters(df: pd.DataFrame):
-    """Sidebar numeric filters for common metrics with strong guards."""
+    """Sidebar numeric filters with safe guards."""
     st.sidebar.subheader("Numeric Filters")
     filters = {}
 
     def safe_slider(colname, label):
-        """Add slider only if enough valid numeric range for Streamlit."""
         if colname not in df.columns:
             return
         nums = pd.to_numeric(df[colname], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
         if nums.empty:
             return
         min_val, max_val = float(nums.min()), float(nums.max())
-        # Ensure finite numbers and real range
         if np.isfinite(min_val) and np.isfinite(max_val) and (max_val - min_val) > 0:
             filters[colname] = st.sidebar.slider(label, min_val, max_val, (min_val, max_val))
 
@@ -134,7 +167,7 @@ def add_numeric_filters(df: pd.DataFrame):
 
 
 def apply_numeric_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
-    """Filter DataFrame based on numeric slider selections."""
+    """Apply numeric slider filters."""
     out = df.copy()
     for col, (low, high) in filters.items():
         if col in out.columns:
@@ -145,7 +178,7 @@ def apply_numeric_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 
 # ---------------- Scoring System ----------------
 def add_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """Add Value, Growth, Momentum, and Value-Contrarian scores with safe numeric conversion."""
+    """Add Value, Growth, Momentum, and Value-Contrarian scores."""
     out = df.copy()
 
     def as_num(s):
@@ -198,7 +231,7 @@ def main():
         "Filter in the sidebar. Fetch Yahoo Finance data for scores and metrics."
     )
 
-    # === Risk Light shown at the top of the app ===
+    # === Risk Light at top ===
     rl = render_risk_light_sidebar()
     top = st.container()
     with top:
@@ -206,13 +239,19 @@ def main():
         c1.metric("S&P 500 (last)", f"{rl['spx_last']:.2f}" if rl["spx_last"] is not None else "—")
         c2.metric("VIX (last)", f"{rl['vix_last']:.2f}" if rl["vix_last"] is not None else "—")
         c3.metric("Tripwire", f"SPX {rl['spx_level']:.0f} / VIX {rl['vix_thr']:.0f}")
+
+        mode_str = f"{rl['mode']} ({rl['interval']})" if rl['mode'] == "Intraday" else rl['mode']
+        st.caption(f"Risk Light source: {mode_str}")
+
         if rl["enabled"]:
             if rl["state"] == "RISK ON":
                 st.success(f"✅ {rl['state']} — {rl['reason']}")
+            elif str(rl["state"]).startswith("AMBER"):
+                st.warning(f"🟡 {rl['state']} — {rl['reason']}")
             elif rl["state"] == "RISK OFF":
                 st.error(f"⚠️ {rl['state']} — {rl['reason']}")
             else:
-                st.warning("⚠️ Risk Light: unable to fetch data right now.")
+                st.info("ℹ️ Risk Light: data unavailable right now.")
 
     # === Upload ===
     uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
@@ -232,7 +271,7 @@ def main():
     # Optional: show raw uploaded data
     checkbox_show_raw(df)
 
-    # === Sidebar taxonomy filters ===
+    # === Taxonomy filters ===
     selected_sector, selected_industry_group, selected_industry = render_sidebar_filters(df)
 
     # === Apply taxonomy filters ===
@@ -243,7 +282,7 @@ def main():
         selected_industry=selected_industry,
     )
 
-    # === Apply quick filters & search ===
+    # === Quick filters & search ===
     quick = render_quick_filters(filtered_df)
     query = render_search_box()
     filtered_df = apply_quick_filters_and_search(filtered_df, quick, query)
@@ -290,8 +329,7 @@ def main():
 
         # === Sort by score ===
         score_cols = [
-            c
-            for c in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]
+            c for c in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]
             if c in result_df.columns
         ]
         if score_cols:
