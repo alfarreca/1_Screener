@@ -1,9 +1,18 @@
+# app.py — with SPX/VIX Risk Light integrated
 import sys
 import pathlib
 import importlib
 import pandas as pd
 import numpy as np
 import streamlit as st
+
+# --- new: optional yfinance import for Risk Light ---
+from functools import lru_cache
+try:
+    import yfinance as yf
+    YF_AVAILABLE = True
+except Exception:
+    YF_AVAILABLE = False
 
 # Ensure repo root is on PYTHONPATH (for Streamlit Cloud)
 APP_DIR = pathlib.Path(__file__).parent.resolve()
@@ -33,6 +42,70 @@ from visualization import (
 )
 
 st.set_page_config(page_title="Financial Stock Screener", layout="wide")
+
+
+# ==================== Risk Light (SPX/VIX) ====================
+@lru_cache(maxsize=32)
+def _last_close_yf(ticker: str):
+    """Fetch last close using yfinance with guards."""
+    if not YF_AVAILABLE:
+        return None
+    try:
+        df = yf.Ticker(ticker).history(period="7d", interval="1d")
+        s = df["Close"].dropna()
+        return float(s.iloc[-1]) if not s.empty else None
+    except Exception:
+        return None
+
+
+def render_risk_light_sidebar():
+    """Sidebar controls + compute risk posture. Returns dict with state/metrics."""
+    st.sidebar.subheader("Risk Light (SPX/VIX)")
+
+    enabled = st.sidebar.checkbox("Show Risk Light", value=True)
+    spx_symbol = st.sidebar.text_input("SPX symbol (Yahoo)", value="^GSPC", help="Alt: SPY")
+    vix_symbol = st.sidebar.text_input("VIX symbol (Yahoo)", value="^VIX")
+    spx_level = st.sidebar.number_input("SPX de-risk level", value=6100.0, step=25.0)
+    vix_thr = st.sidebar.number_input("VIX threshold", value=18.0, step=0.5)
+
+    if not enabled:
+        return {
+            "enabled": False,
+            "state": "HIDDEN",
+            "reason": "Disabled by user",
+            "spx_last": None,
+            "vix_last": None,
+            "spx_level": spx_level,
+            "vix_thr": vix_thr,
+            "risk_off": None,
+        }
+
+    spx_last = _last_close_yf(spx_symbol)
+    vix_last = _last_close_yf(vix_symbol)
+
+    if not YF_AVAILABLE:
+        st.sidebar.warning("`yfinance` not installed. Add it to requirements.txt.")
+    state, reason, risk_off = "UNKNOWN", "Data unavailable", None
+    if (spx_last is not None) and (vix_last is not None):
+        risk_off = (spx_last < spx_level) or (vix_last > vix_thr)
+        if risk_off:
+            state = "RISK OFF"
+            reason = f"SPX<{spx_level:.0f} or VIX>{vix_thr:.0f}"
+        else:
+            state = "RISK ON"
+            reason = f"SPX≥{spx_level:.0f} and VIX≤{vix_thr:.0f}"
+
+    return {
+        "enabled": True,
+        "state": state,
+        "reason": reason,
+        "spx_last": spx_last,
+        "vix_last": vix_last,
+        "spx_level": spx_level,
+        "vix_thr": vix_thr,
+        "risk_off": risk_off,
+    }
+# ===============================================================
 
 
 # ---------------- Numeric Filters ----------------
@@ -124,6 +197,22 @@ def main():
         "Upload an Excel file with Symbol, Sector, Industry Group, Industry (Name optional). "
         "Filter in the sidebar. Fetch Yahoo Finance data for scores and metrics."
     )
+
+    # === Risk Light shown at the top of the app ===
+    rl = render_risk_light_sidebar()
+    top = st.container()
+    with top:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("S&P 500 (last)", f"{rl['spx_last']:.2f}" if rl["spx_last"] is not None else "—")
+        c2.metric("VIX (last)", f"{rl['vix_last']:.2f}" if rl["vix_last"] is not None else "—")
+        c3.metric("Tripwire", f"SPX {rl['spx_level']:.0f} / VIX {rl['vix_thr']:.0f}")
+        if rl["enabled"]:
+            if rl["state"] == "RISK ON":
+                st.success(f"✅ {rl['state']} — {rl['reason']}")
+            elif rl["state"] == "RISK OFF":
+                st.error(f"⚠️ {rl['state']} — {rl['reason']}")
+            else:
+                st.warning("⚠️ Risk Light: unable to fetch data right now.")
 
     # === Upload ===
     uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
