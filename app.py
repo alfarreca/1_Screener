@@ -1,10 +1,11 @@
-# app.py — Financial Stock Screener (Pro) + Risk Light v2
-# -------------------------------------------------------
+# app.py — Financial Stock Screener (Pro) + Risk Light v2 + Posture-Aware Scoring
+# --------------------------------------------------------------------------------
 # Features:
 # - SPX/VIX Risk Light with tri-state: RISK ON / AMBER—PRICE / AMBER—VOL / RISK OFF
 # - Daily or Intraday mode (15m/30m/60m), with Refresh button
 # - Screener flow using your existing modules: data_loader, analysis, visualization
 # - Value/Growth/Momentum + Value-Contrarian score
+# - NEW: Posture-Adjusted Score (PAS), Quality Gates, Position Size Factor
 #
 # Requirements: streamlit, pandas, numpy, (yfinance for Risk Light)
 
@@ -16,9 +17,9 @@ from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import streamlit as st
+from functools import lru_cache
 
 # ---------- Optional yfinance for Risk Light ----------
-from functools import lru_cache
 try:
     import yfinance as yf
     YF_AVAILABLE = True
@@ -57,7 +58,7 @@ from visualization import (
 
 # ==================== Risk Light (SPX/VIX) v2 ====================
 @lru_cache(maxsize=256)
-def _last_price(ticker, period, interval, salt):
+def _last_price(ticker: str, period: str, interval: str, salt: int):
     """
     Get last price using yfinance; `salt` is a cache-buster integer.
     Returns float or None.
@@ -127,11 +128,11 @@ def render_risk_light_sidebar():
         if price_breach and vol_breach:
             state, reason, risk_off, amber = "RISK OFF", "Price < level AND Vol > threshold", True, None
         elif price_breach:
-            state, reason, risk_off, amber = "AMBER — PRICE", "SPX<{}".format(int(spx_level)), False, "PRICE"
+            state, reason, risk_off, amber = "AMBER — PRICE", f"SPX<{int(spx_level)}", False, "PRICE"
         elif vol_breach:
-            state, reason, risk_off, amber = "AMBER — VOL", "VIX>{}".format(int(vix_thr)), False, "VOL"
+            state, reason, risk_off, amber = "AMBER — VOL", f"VIX>{int(vix_thr)}", False, "VOL"
         else:
-            state, reason, risk_off, amber = "RISK ON", "SPX≥{} and VIX≤{}".format(int(spx_level), int(vix_thr)), False, None
+            state, reason, risk_off, amber = "RISK ON", f"SPX≥{int(spx_level)} and VIX≤{int(vix_thr)}", False, None
 
     return {
         "enabled": True, "state": state, "reason": reason,
@@ -176,7 +177,7 @@ def apply_numeric_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     return out
 
 
-# ---------------- Scoring System ----------------
+# ---------------- Base Scoring System ----------------
 def add_scores(df: pd.DataFrame) -> pd.DataFrame:
     """Add Value, Growth, Momentum, and Value-Contrarian scores."""
     out = df.copy()
@@ -219,6 +220,87 @@ def add_scores(df: pd.DataFrame) -> pd.DataFrame:
         contrarian_factor = contrarian_factor.clip(lower=0, upper=1)
 
         out["Value-Contrarian Score"] = (v * contrarian_factor * 100).round(1)
+
+    return out
+
+
+# ---------------- Posture-aware scoring ----------------
+def _find_col(cols, candidates):
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+
+def posture_weights(state: str):
+    """Weights for Momentum/Value/Growth and quality thresholds by posture."""
+    s = (state or "").upper()
+    if s == "RISK ON":
+        return {"w": {"M": 0.50, "V": 0.30, "G": 0.20, "VC": 0.00}, "pe_cap": None, "vc_min": None, "size": 1.00}
+    if "AMBER" in s:
+        return {"w": {"M": 0.25, "V": 0.25, "G": 0.00, "VC": 0.50}, "pe_cap": 25, "vc_min": 60, "size": 0.60}
+    if s == "RISK OFF":
+        return {"w": {"M": 0.10, "V": 0.30, "G": 0.00, "VC": 0.60}, "pe_cap": 20, "vc_min": 70, "size": 0.35}
+    # Unknown → cautious (amber-like)
+    return {"w": {"M": 0.25, "V": 0.25, "G": 0.00, "VC": 0.50}, "pe_cap": 25, "vc_min": 60, "size": 0.60}
+
+
+def add_posture_adjusted_score(df: pd.DataFrame, posture_state: str,
+                               enforce_gates: bool = True,
+                               require_pos_fcf: bool = True) -> pd.DataFrame:
+    """
+    Create Posture-Adjusted Score (PAS) and Position Size Factor.
+    Optionally enforce amber/red quality gates.
+    """
+    out = df.copy()
+    W = posture_weights(posture_state)
+
+    v_col  = "Value Score" if "Value Score" in out.columns else None
+    g_col  = "Growth Score" if "Growth Score" in out.columns else None
+    m_col  = "Momentum Score" if "Momentum Score" in out.columns else None
+    vc_col = "Value-Contrarian Score" if "Value-Contrarian Score" in out.columns else None
+    pe_col = _find_col(out.columns, ["PE Ratio", "P/E", "PE"])
+
+    # Build base components (0..100); missing -> 0
+    V  = pd.to_numeric(out.get(v_col, 0), errors="coerce").fillna(0)
+    G  = pd.to_numeric(out.get(g_col, 0), errors="coerce").fillna(0)
+    M  = pd.to_numeric(out.get(m_col, 0), errors="coerce").fillna(0)
+    VC = pd.to_numeric(out.get(vc_col, 0), errors="coerce").fillna(0)
+
+    w = W["w"]
+    pas = (w["M"]*M + w["V"]*V + w["G"]*G + w["VC"]*VC)
+
+    # P/E penalty only in amber/red when a cap exists
+    if W["pe_cap"] is not None and pe_col:
+        pe = pd.to_numeric(out[pe_col], errors="coerce")
+        over = (pe - W["pe_cap"]).clip(lower=0)
+        # Max 20 pts penalty if P/E is far over cap
+        penalty = (over / (W["pe_cap"] * 1.0)).clip(upper=1.0) * 20.0
+        pas = (pas - penalty).clip(lower=0)
+
+    out["Posture-Adjusted Score"] = pas.round(1)
+    out["Position Size Factor"] = W["size"]
+
+    # Quality Gates (optional)
+    gate_ok = pd.Series(True, index=out.index)
+
+    if W["vc_min"] is not None and vc_col:
+        gate_ok &= (VC >= W["vc_min"])
+
+    if W["pe_cap"] is not None and pe_col:
+        pe = pd.to_numeric(out[pe_col], errors="coerce")
+        gate_ok &= (pe <= W["pe_cap"])
+
+    # Positive FCF (if available)
+    fcf_col = _find_col(out.columns, ["FCF Margin", "Free Cash Flow Margin", "FreeCashFlowMargin"])
+    if require_pos_fcf and fcf_col:
+        fcf = pd.to_numeric(out[fcf_col], errors="coerce")
+        gate_ok &= (fcf > 0)
+
+    out["Quality Gate Pass"] = gate_ok
+
+    if enforce_gates and ("AMBER" in (posture_state or "").upper() or (posture_state or "").upper() == "RISK OFF"):
+        out = out[gate_ok].copy()
 
     return out
 
@@ -320,20 +402,38 @@ def main():
 
         result_df = merge_results(filtered_df, financial_data)
 
-        # === Add scores ===
+        # === Add base scores ===
         result_df = add_scores(result_df)
+
+        # --- NEW: posture-aware scoring & gates ---
+        st.sidebar.subheader("Posture Scoring")
+        enforce = st.sidebar.checkbox("Enforce amber/red quality gates", value=True)
+        need_pos_fcf = st.sidebar.checkbox("Require positive FCF margin (if available)", value=True)
+        result_df = add_posture_adjusted_score(
+            result_df,
+            posture_state=rl["state"],
+            enforce_gates=enforce,
+            require_pos_fcf=need_pos_fcf
+        )
+
+        # Put PAS & helpers at the front
+        cols = result_df.columns.tolist()
+        for c in ["Posture-Adjusted Score", "Position Size Factor", "Quality Gate Pass"]:
+            if c in cols:
+                cols = [c] + [x for x in cols if x != c]
+        result_df = result_df[cols]
 
         # === Numeric filters ===
         num_filters = add_numeric_filters(result_df)
         result_df = apply_numeric_filters(result_df, num_filters)
 
-        # === Sort by score ===
+        # === Sort by score (include PAS) ===
         score_cols = [
-            c for c in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]
+            c for c in ["Posture-Adjusted Score", "Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]
             if c in result_df.columns
         ]
         if score_cols:
-            sort_choice = st.sidebar.selectbox("Sort by Score", ["None"] + score_cols)
+            sort_choice = st.sidebar.selectbox("Sort by Score", ["None"] + score_cols, index=1)
             if sort_choice != "None":
                 result_df = result_df.sort_values(sort_choice, ascending=False)
 
