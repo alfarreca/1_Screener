@@ -1,5 +1,6 @@
 # analysis.py
 from __future__ import annotations
+
 from typing import List, Dict, Any, Iterable
 import pandas as pd
 import yfinance as yf
@@ -14,6 +15,7 @@ def _as_list(symbols: Iterable[str]) -> List[str]:
         s = str(s).strip().upper()
         if s:
             out.append(s)
+    # de-dup but keep order
     seen, uniq = set(), []
     for s in out:
         if s not in seen:
@@ -35,7 +37,7 @@ def _first_not_null(*values):
             continue
     return None
 
-# crude map from industry -> industry group (extend as you wish)
+# crude map from industry -> industry group (extend as needed)
 _GICS_GROUP_MAP: Dict[str, str] = {
     "Semiconductors": "Semiconductors & Semiconductor Equipment",
     "Semiconductor": "Semiconductors & Semiconductor Equipment",
@@ -58,7 +60,7 @@ _GICS_GROUP_MAP: Dict[str, str] = {
     "Consumer Services": "Consumer Services",
 }
 
-# very light theme inference using keywords in industry/summary
+# very light theme inference using keywords
 _THEME_RULES: List[tuple[str, str]] = [
     ("gold", "Gold"),
     ("silver", "Silver"),
@@ -90,7 +92,7 @@ def _infer_industry_group(industry: str | None) -> str | None:
     for key, group in _GICS_GROUP_MAP.items():
         if key.lower() in txt:
             return group
-    # fallback: title-case industry as group
+    # fallback: use industry as group
     return industry
 
 def _infer_theme(sector: str | None, industry: str | None, summary: str | None) -> str | None:
@@ -100,14 +102,40 @@ def _infer_theme(sector: str | None, industry: str | None, summary: str | None) 
             return theme
     return None
 
-# ---------------- taxonomy-aware fetch ----------------
+# ---------------- taxonomy filtering (as expected by app.py) ----------------
+
+def apply_filters(
+    df: pd.DataFrame,
+    selected_sector: str = "All",
+    selected_industry_group: str = "All",
+    selected_industry: str = "All",
+) -> pd.DataFrame:
+    """
+    Filter by Sector -> Industry Group -> Industry.
+    Missing columns are ignored gracefully.
+    """
+    out = df.copy()
+
+    if "Sector" in out.columns and selected_sector and selected_sector != "All":
+        out = out[out["Sector"].astype(str) == selected_sector]
+
+    if "Industry Group" in out.columns and selected_industry_group and selected_industry_group != "All":
+        out = out[out["Industry Group"].astype(str) == selected_industry_group]
+
+    if "Industry" in out.columns and selected_industry and selected_industry != "All":
+        out = out[out["Industry"].astype(str) == selected_industry]
+
+    return out.reset_index(drop=True)
+
+# ---------------- Yahoo fetch (metrics + taxonomy) ----------------
 
 def fetch_yfinance_data(symbols: Iterable[str]) -> pd.DataFrame:
     """
     Fetch metrics + taxonomy from Yahoo.
-    - Sector & Industry from info
-    - Industry Group inferred from Industry
-    - Theme inferred by keywords (best-effort)
+      - Sector & Industry from info
+      - Industry Group inferred from Industry
+      - Theme inferred by simple keywords
+    Final fallback to history() for price/52w/volume if info fields missing.
     Returns df; failures stored in df.attrs['failed_symbols'].
     """
     syms = _as_list(symbols)
@@ -140,13 +168,16 @@ def fetch_yfinance_data(symbols: Iterable[str]) -> pd.DataFrame:
         sector = _first_not_null(info.get("sector"))
         industry = _first_not_null(info.get("industry"))
         long_summary = _first_not_null(info.get("longBusinessSummary"))
-
         industry_group = _infer_industry_group(industry)
         theme = _infer_theme(sector, industry, long_summary)
 
         # metrics
-        price = _first_not_null(fi.get("last_price"), fi.get("regular_market_price"),
-                                info.get("currentPrice"), info.get("regularMarketPrice"))
+        price = _first_not_null(
+            fi.get("last_price"),
+            fi.get("regular_market_price"),
+            info.get("currentPrice"),
+            info.get("regularMarketPrice"),
+        )
         mcap = _first_not_null(fi.get("market_cap"), info.get("marketCap"))
         pe   = _first_not_null(fi.get("trailing_pe"), info.get("trailingPE"))
         dy   = _first_not_null(fi.get("dividend_yield"), info.get("dividendYield"))
@@ -154,9 +185,11 @@ def fetch_yfinance_data(symbols: Iterable[str]) -> pd.DataFrame:
         lo52 = _first_not_null(fi.get("year_low"),  info.get("fiftyTwoWeekLow"))
         beta = _first_not_null(info.get("beta"), info.get("beta3Year"))
         vol  = _first_not_null(info.get("volume"), info.get("regularMarketVolume"))
-        avgv = _first_not_null(fi.get("three_month_average_volume"),
-                               info.get("averageVolume"),
-                               info.get("averageDailyVolume3Month"))
+        avgv = _first_not_null(
+            fi.get("three_month_average_volume"),
+            info.get("averageVolume"),
+            info.get("averageDailyVolume3Month"),
+        )
 
         # fallback from history if needed
         if any(v is None for v in [price, hi52, lo52, vol, avgv]):
@@ -175,6 +208,7 @@ def fetch_yfinance_data(symbols: Iterable[str]) -> pd.DataFrame:
             failed.append(s)
             continue
 
+        # normalize dividend yield to %
         if isinstance(dy, (int, float)) and dy is not None and dy < 1:
             dy = dy * 100.0
 
@@ -197,7 +231,7 @@ def fetch_yfinance_data(symbols: Iterable[str]) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
 
-    # enforce numeric types where possible
+    # numeric dtypes where possible
     for col in ["Current Price","PE Ratio","Market Cap","Dividend Yield",
                 "52 Week High","52 Week Low","Beta","Volume","Avg Volume"]:
         if col in df.columns:
@@ -221,6 +255,7 @@ def merge_results(filtered_df: pd.DataFrame, financial_data: pd.DataFrame, *, ov
     base = filtered_df.copy()
     if "Symbol" in base.columns:
         base["Symbol"] = base["Symbol"].astype(str).str.strip().str.upper()
+
     fd = financial_data.copy()
     if "Symbol" in fd.columns:
         fd["Symbol"] = fd["Symbol"].astype(str).str.strip().str.upper()
@@ -238,7 +273,7 @@ def merge_results(filtered_df: pd.DataFrame, financial_data: pd.DataFrame, *, ov
 
     return out
 
-# convenience wrapper if some app versions use it
+# convenience wrapper used by some app flows
 def fetch_yahoo_metrics(filtered_df: pd.DataFrame, override_taxonomy: bool = False) -> pd.DataFrame:
     if filtered_df is None or filtered_df.empty or "Symbol" not in filtered_df.columns:
         return filtered_df.copy()
