@@ -1,0 +1,8 @@
+# .streamlit/config.toml
+[theme]
+base = "dark"                       # force dark mode
+primaryColor = "#22c55e"            # accent (green)
+backgroundColor = "#0b0f14"         # page bg
+secondaryBackgroundColor = "#121922" # cards / sidebar bg
+textColor = "#e5eef5"               # text
+font = "sans serif"                 # or "monospace", "serif"
