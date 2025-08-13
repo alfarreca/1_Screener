@@ -1,22 +1,60 @@
-import streamlit as st
-import pandas as pd
+# data_loader.py
+from __future__ import annotations
+
+import io
 from typing import Optional, Set
+import pandas as pd
 
-REQUIRED_COLUMNS: Set[str] = {"Symbol", "Sector", "Industry Group", "Industry"}
+# New required columns per your spec
+REQUIRED_COLUMNS: Set[str] = {"Symbol", "Name", "Country", "Asset_Type", "Notes"}
 
 
-@st.cache_data
+def _normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """Trim spaces and standardize header names."""
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
 def load_data(uploaded_file) -> Optional[pd.DataFrame]:
-    """Load Excel into a DataFrame."""
+    """
+    Load CSV or Excel. We expect at least the five required columns.
+    """
     if uploaded_file is None:
         return None
+
+    name = uploaded_file.name.lower()
     try:
-        return pd.read_excel(uploaded_file)
-    except Exception as e:
-        st.error(f"Failed to read Excel file: {e}")
-        return None
+        if name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            # default to Excel
+            # If the workbook has multiple sheets, take the first sheet
+            df = pd.read_excel(uploaded_file, engine="openpyxl")
+    except Exception:
+        # Sometimes Streamlit gives a BytesIO-like object; try bytes then read_excel
+        try:
+            content = uploaded_file.read()
+            df = pd.read_excel(io.BytesIO(content), engine="openpyxl")
+        except Exception:
+            return None
+
+    df = _normalize_headers(df)
+
+    # Ensure at least the required columns exist (others are optional and will be filled by Yahoo)
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        # Create missing required columns as empty (so downstream never KeyErrors)
+        for c in missing:
+            df[c] = pd.NA
+
+    # Keep only relevant columns plus any extras the user included
+    return df
 
 
 def validate_columns(df: pd.DataFrame) -> bool:
-    """Return True if all required columns are present."""
-    return REQUIRED_COLUMNS.issubset(set(df.columns))
+    """Check that the uploaded file has the 5 required columns."""
+    if df is None or df.empty:
+        return False
+    have = set(df.columns)
+    return REQUIRED_COLUMNS.issubset(have)
