@@ -1,8 +1,10 @@
 import io
+import base64
 from typing import Tuple, Optional, List, Dict
 
 import pandas as pd
 import streamlit as st
+import yfinance as yf
 
 # ---------- Small helpers ----------
 
@@ -33,6 +35,33 @@ def _as_0_100(col: pd.Series) -> pd.Series:
     x = pd.to_numeric(col, errors="coerce")
     return x.clip(lower=0, upper=100).round(1)
 
+@st.cache_data(show_spinner=False)
+def _sparkline_png_bytes(symbol: str, period: str = "1mo") -> Optional[bytes]:
+    """
+    Return PNG bytes for a tiny sparkline (or None on failure).
+    Cached per (symbol, period) to stay fast on Streamlit Cloud.
+    """
+    try:
+        data = yf.download(symbol, period=period, interval="1d", progress=False)
+        if data.empty or "Close" not in data:
+            return None
+
+        # Lazy headless matplotlib import to avoid hard dependency at module import time
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(2, 0.5))
+        ax.plot(data["Close"], linewidth=1)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0, dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception:
+        return None
+
 # ---------- Raw data toggle ----------
 
 def checkbox_show_raw(df: pd.DataFrame) -> None:
@@ -40,32 +69,53 @@ def checkbox_show_raw(df: pd.DataFrame) -> None:
         with st.expander("Raw data", expanded=False):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-# ---------- Sidebar filters ----------
+# ---------- Sidebar filters (SAFE) ----------
 
 def render_sidebar_filters(df: pd.DataFrame) -> Tuple[str, str, str]:
+    """
+    Build filters only for taxonomy columns that exist.
+    Prevents KeyError when enrichment hasn't filled them yet.
+    """
     st.sidebar.header("Filters")
 
-    sectors = ["All"] + _sorted_unique(df["Sector"])
-    selected_sector = st.sidebar.selectbox("Sector", sectors, index=0, key="sector")
+    has_sector = "Sector" in df.columns
+    has_group  = "Industry Group" in df.columns
+    has_ind    = "Industry" in df.columns
 
-    if selected_sector != "All":
-        ig_list = ["All"] + _sorted_unique(df.loc[df["Sector"] == selected_sector, "Industry Group"])
+    # Sector
+    if has_sector:
+        sectors = ["All"] + _sorted_unique(df["Sector"])
+        selected_sector = st.sidebar.selectbox("Sector", sectors, index=0, key="sector")
     else:
-        ig_list = ["All"] + _sorted_unique(df["Industry Group"])
-    selected_industry_group = st.sidebar.selectbox("Industry Group", ig_list, index=0, key="ig")
+        st.sidebar.info("Sector not available yet (will appear after enrichment).")
+        selected_sector = "All"
 
-    if selected_sector != "All" and selected_industry_group != "All":
-        mask = (df["Sector"] == selected_sector) & (df["Industry Group"] == selected_industry_group)
-        ind_list = ["All"] + _sorted_unique(df.loc[mask, "Industry"])
-    elif selected_sector != "All":
-        mask = df["Sector"] == selected_sector
-        ind_list = ["All"] + _sorted_unique(df.loc[mask, "Industry"])
-    elif selected_industry_group != "All":
-        mask = df["Industry Group"] == selected_industry_group
-        ind_list = ["All"] + _sorted_unique(df.loc[mask, "Industry"])
+    # Industry Group
+    if has_group:
+        if has_sector and selected_sector != "All":
+            ig_list = ["All"] + _sorted_unique(df.loc[df["Sector"] == selected_sector, "Industry Group"])
+        else:
+            ig_list = ["All"] + _sorted_unique(df["Industry Group"])
+        selected_industry_group = st.sidebar.selectbox("Industry Group", ig_list, index=0, key="ig")
     else:
-        ind_list = ["All"] + _sorted_unique(df["Industry"])
-    selected_industry = st.sidebar.selectbox("Industry", ind_list, index=0, key="industry")
+        selected_industry_group = "All"
+
+    # Industry
+    if has_ind:
+        if has_sector and has_group and selected_sector != "All" and selected_industry_group != "All":
+            mask = (df["Sector"] == selected_sector) & (df["Industry Group"] == selected_industry_group)
+            ind_list = ["All"] + _sorted_unique(df.loc[mask, "Industry"])
+        elif has_sector and selected_sector != "All":
+            mask = df["Sector"] == selected_sector
+            ind_list = ["All"] + _sorted_unique(df.loc[mask, "Industry"])
+        elif has_group and selected_industry_group != "All":
+            mask = df["Industry Group"] == selected_industry_group
+            ind_list = ["All"] + _sorted_unique(df.loc[mask, "Industry"])
+        else:
+            ind_list = ["All"] + _sorted_unique(df["Industry"])
+        selected_industry = st.sidebar.selectbox("Industry", ind_list, index=0, key="industry")
+    else:
+        selected_industry = "All"
 
     return selected_sector, selected_industry_group, selected_industry
 
@@ -111,7 +161,7 @@ def column_selector(
             "Visible columns",
             options=ordered,
             default=ordered,
-            key=f"{key_prefix}visible_cols",  # unique key per table
+            key=f"{key_prefix}visible_cols",
         )
     return selected if selected else ordered
 
@@ -161,18 +211,22 @@ def show_filtered_table(filtered_df: pd.DataFrame, visible_cols: Optional[List[s
 def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]] = None) -> None:
     st.subheader("Results with Yahoo Finance Metrics")
 
-    # Convert scores to 0-100 for progress bars (including Value-Contrarian)
+    # Normalize scores for progress bars
     for score_col in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if score_col in result_df.columns:
             result_df[score_col] = _as_0_100(result_df[score_col])
 
-    # Prettify Market Cap
+    # Humanized Market Cap
     if "Market Cap" in result_df.columns:
         result_df = result_df.copy()
         result_df["Market Cap (fmt)"] = result_df["Market Cap"].apply(_human_mc)
 
+    # Sparklines (bytes) for each symbol
+    if "Symbol" in result_df.columns:
+        result_df["Chart"] = result_df["Symbol"].apply(_sparkline_png_bytes)
+
     default_front = [
-        "Symbol", "Name", "Sector", "Industry Group", "Industry",
+        "Symbol", "Name", "Chart", "Sector", "Industry Group", "Industry",
         "Current Price", "PE Ratio", "Market Cap (fmt)", "Dividend Yield",
         "52 Week High", "52 Week Low", "Beta", "Volume", "Avg Volume",
         "Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"
@@ -183,17 +237,19 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
         visible_cols = column_selector(result_df, default_front=default_front, key_prefix="results_")
     table_df = result_df[visible_cols] if visible_cols else result_df[ordered]
 
-    # Column config with progress bars for scores + nice number formats
+    # Column config: scores as progress bars; chart as ImageColumn
     col_config = {}
-
-    # Scores as progress bars
     for sc in ["Value Score", "Growth Score", "Momentum Score", "Value-Contrarian Score"]:
         if sc in table_df.columns:
-            col_config[sc] = st.column_config.ProgressColumn(
-                sc, min_value=0, max_value=100, format="%.0f",
-            )
+            col_config[sc] = st.column_config.ProgressColumn(sc, min_value=0, max_value=100, format="%.0f")
 
-    # Numeric formatting for core metrics
+    if "Chart" in table_df.columns:
+        col_config["Chart"] = st.column_config.ImageColumn(
+            "Chart",
+            help="30-day price sparkline",
+            width="small",
+        )
+
     for c in table_df.columns:
         if c in {"Current Price", "52 Week High", "52 Week Low"}:
             col_config[c] = st.column_config.NumberColumn(format="%.2f")
@@ -205,7 +261,7 @@ def show_results_table(result_df: pd.DataFrame, visible_cols: Optional[List[str]
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
         elif c == "Market Cap":
             col_config[c] = st.column_config.NumberColumn(format="%.0f")
-        # Market Cap (fmt) is already humanized text
+        # Market Cap (fmt) is text already
 
     st.dataframe(
         table_df,
